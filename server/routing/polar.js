@@ -32,6 +32,46 @@ export const BOATS = {
       [0, 0, 6.0, 6.7, 7.2, 7.8, 8.4, 9.2, 9.7, 10.6, 11.2, 10.3, 9.5], // 25 kn
     ],
   },
+  perfcruiser: {
+    id: "perfcruiser",
+    name: "Performance cruiser (~38ft)",
+    nogo: 30,
+    motorKn: 6.0,
+    source: "synthetic_baseline",
+    twa: TWA_COLS,
+    tws: TWS_ROWS,
+    speed: [
+      [0, 0, 3.0, 3.9, 4.5, 4.9, 5.1, 5.0, 4.8, 4.4, 3.8, 3.0, 2.5],
+      [0, 0, 4.3, 5.1, 5.7, 6.1, 6.4, 6.4, 6.2, 5.7, 5.0, 4.0, 3.5],
+      [0, 0, 5.2, 6.0, 6.5, 6.9, 7.2, 7.3, 7.1, 6.8, 6.1, 5.1, 4.5],
+      [0, 0, 5.9, 6.6, 7.0, 7.4, 7.7, 8.0, 8.0, 7.8, 7.2, 6.2, 5.6],
+      [0, 0, 6.3, 6.9, 7.3, 7.8, 8.2, 8.6, 8.7, 8.7, 8.3, 7.3, 6.6],
+      [0, 0, 6.5, 7.1, 7.5, 8.1, 8.6, 9.1, 9.3, 9.6, 9.4, 8.4, 7.7],
+      [0, 0, 6.6, 7.2, 7.7, 8.3, 8.9, 9.6, 10.0, 10.5, 10.5, 9.5, 8.7],
+      [0, 0, 6.7, 7.4, 7.9, 8.6, 9.4, 10.5, 11.1, 12.1, 12.4, 11.3, 10.4],
+      [0, 0, 6.6, 7.3, 8.0, 8.8, 9.8, 11.2, 12.1, 13.7, 14.6, 13.4, 12.3],
+    ],
+  },
+  bluewater: {
+    id: "bluewater",
+    name: "Heavy bluewater cruiser (~45ft)",
+    nogo: 38, // langkieler, kruist slecht
+    motorKn: 7.0,
+    source: "synthetic_baseline",
+    twa: TWA_COLS,
+    tws: TWS_ROWS,
+    speed: [
+      [0, 0, 0.0, 2.6, 3.3, 3.8, 4.0, 4.0, 3.8, 3.4, 2.9, 2.2, 1.9],
+      [0, 0, 3.0, 3.9, 4.5, 4.9, 5.2, 5.2, 5.0, 4.6, 4.0, 3.2, 2.7],
+      [0, 0, 4.0, 4.7, 5.2, 5.6, 5.9, 6.0, 5.9, 5.5, 4.9, 4.1, 3.6],
+      [0, 0, 4.6, 5.3, 5.7, 6.1, 6.4, 6.6, 6.6, 6.3, 5.8, 5.0, 4.5],
+      [0, 0, 5.0, 5.6, 6.0, 6.4, 6.8, 7.1, 7.2, 7.1, 6.7, 5.9, 5.4],
+      [0, 0, 5.2, 5.8, 6.2, 6.7, 7.1, 7.5, 7.7, 7.9, 7.6, 6.8, 6.3],
+      [0, 0, 5.4, 6.0, 6.4, 6.9, 7.4, 7.9, 8.2, 8.6, 8.5, 7.7, 7.1],
+      [0, 0, 5.6, 6.2, 6.7, 7.3, 7.9, 8.7, 9.2, 9.9, 10.1, 9.3, 8.6],
+      [0, 0, 5.6, 6.3, 6.9, 7.6, 8.3, 9.3, 9.9, 11.0, 11.5, 10.7, 9.9],
+    ],
+  },
   racer: {
     id: "racer",
     name: "Performance racer (~40ft)",
@@ -86,7 +126,14 @@ export function polarSpeed(boat, twaDeg, twsKnots) {
 
   const sLow = interp1d(twa, twa0, twa1, s00, s01);
   const sHigh = interp1d(twa, twa0, twa1, s10, s11);
-  const speed = interp1d(twsKnots, tws0, tws1, sLow, sHigh);
+  let speed = interp1d(twsKnots, tws0, tws1, sLow, sHigh);
+
+  // Veilige extrapolatie:
+  // - boven de hoogste TWS: clamp (vlak) — conservatief, geen onrealistische groei
+  // - onder de laagste TWS: lineair naar 0 schalen i.p.v. de laagste rij overschatten
+  const twsMin = boat.tws[0];
+  if (twsKnots < twsMin) speed *= Math.max(0, twsKnots / twsMin);
+
   return Math.max(0, speed);
 }
 

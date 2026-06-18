@@ -146,7 +146,7 @@ function setStatus(msg, cls = "") {
 }
 
 // ---- Route berekenen ----
-$("compute").onclick = async () => {
+async function computeRoute() {
   if (!state.start || !state.end) {
     setStatus("Plaats eerst start (A) én bestemming (B).", "error");
     return;
@@ -157,6 +157,7 @@ $("compute").onclick = async () => {
     boatId: $("boat").value,
     departure: $("departure").value + ":00Z",
     zones: state.zones,
+    useEngine: $("useEngine").checked,
   };
   $("compute").disabled = true;
   setStatus("Weerdata ophalen en route berekenen…", "busy");
@@ -171,6 +172,7 @@ $("compute").onclick = async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Onbekende fout");
+    state.hasRoute = true;
     drawResult(data);
     setStatus(`Klaar in ${(data.meta.fetchMs + data.meta.computeMs) / 1000}s.`, "ok");
   } catch (err) {
@@ -178,7 +180,16 @@ $("compute").onclick = async () => {
   } finally {
     $("compute").disabled = false;
   }
-};
+}
+
+$("compute").onclick = computeRoute;
+
+// Herbereken automatisch bij wisselen van schip of motor-optie (als er al een route is).
+function recomputeIfRouted() {
+  if (state.hasRoute && state.start && state.end) computeRoute();
+}
+$("boat").addEventListener("change", recomputeIfRouted);
+$("useEngine").addEventListener("change", recomputeIfRouted);
 
 function drawResult(data) {
   // isochronen (achtergrond)
@@ -226,11 +237,14 @@ function renderSummary(data) {
   const h = Math.floor(s.durationHours);
   const m = Math.round((s.durationHours - h) * 60);
   $("result").classList.remove("hidden");
+  const motorPct = Math.round((s.motorFraction || 0) * 100);
   $("summary").innerHTML = `
     <div class="item"><div class="k">Reistijd</div><div class="v">${h}u ${m}m</div></div>
     <div class="item"><div class="k">Afstand</div><div class="v">${s.distanceNM} NM</div></div>
     <div class="item"><div class="k">Direct (grootcirkel)</div><div class="v">${s.directDistanceNM} NM</div></div>
     <div class="item"><div class="k">Gem. snelheid</div><div class="v">${s.avgSpeedKn} kn</div></div>
+    <div class="item"><div class="k">Onder motor</div><div class="v">${motorPct}%</div></div>
+    <div class="item"><div class="k">Schip</div><div class="v" style="font-size:13px">${data.meta.boat.name}</div></div>
     <div class="item" style="grid-column:1/3"><div class="k">Aankomst (ETA)</div><div class="v">${eta}</div></div>
   `;
   if (data.meta.truncatedForecast) {
@@ -240,7 +254,7 @@ function renderSummary(data) {
 
 function renderLegs(data) {
   const wps = data.waypoints;
-  let rows = `<tr><th>tijd</th><th>COG°</th><th>SOG kn</th><th>TWA°</th><th>TWS kn</th><th>stroom kn</th></tr>`;
+  let rows = `<tr><th>tijd</th><th>COG°</th><th>SOG kn</th><th>TWA°</th><th>TWS kn</th><th>stroom kn</th><th>golf m</th></tr>`;
   let prevCog = null;
   // toon ~elke n-de waypoint om de tabel beknopt te houden
   const stepEvery = Math.max(1, Math.floor(wps.length / 40));
@@ -249,9 +263,10 @@ function renderLegs(data) {
     const isTack = prevCog != null && Math.abs(angleDelta(w.cog, prevCog)) > 30;
     if (i % stepEvery !== 0 && !isTack && i !== wps.length - 1) { prevCog = w.cog; return; }
     const t = new Date(w.timeMs).toUTCString().slice(17, 22);
+    const mark = (w.motoring ? " ⚙" : "") + (isTack ? " ⟲" : "");
     rows += `<tr class="${isTack ? "tack" : ""}">
-      <td>${t}${isTack ? " ⟲" : ""}</td><td>${w.cog}</td><td>${w.sog}</td>
-      <td>${w.twa}</td><td>${w.tws}</td><td>${w.curSpeed}</td></tr>`;
+      <td>${t}${mark}</td><td>${w.cog}</td><td>${w.sog}</td>
+      <td>${w.twa}</td><td>${w.tws}</td><td>${w.curSpeed}</td><td>${w.waveHeight ?? 0}</td></tr>`;
     prevCog = w.cog;
   });
   $("legs").innerHTML = rows;
