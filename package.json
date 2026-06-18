@@ -6,7 +6,10 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "dev": "node --watch server/index.js",
+    "test": "node --test test/",
+    "typecheck": "node --check server/index.js && node --check server/routing/geo.js && node --check server/routing/polar.js && node --check server/routing/weather.js && node --check server/routing/isochrone.js && node --check public/app.js",
+    "lint": "eslint ."
   },
   "engines": {
     "node": ">=18"

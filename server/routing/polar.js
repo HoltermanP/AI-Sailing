@@ -15,6 +15,8 @@ export const BOATS = {
     id: "cruiser",
     name: "Cruising yacht (~36ft)",
     nogo: 32, // kan niet hoger dan ~32° aan de wind
+    motorKn: 5.5, // kruissnelheid op de motor (windstilte)
+    source: "synthetic_baseline",
     twa: TWA_COLS,
     tws: TWS_ROWS,
     // speed[twsIndex][twaIndex]
@@ -34,6 +36,8 @@ export const BOATS = {
     id: "racer",
     name: "Performance racer (~40ft)",
     nogo: 28,
+    motorKn: 6.0,
+    source: "synthetic_baseline",
     twa: TWA_COLS,
     tws: TWS_ROWS,
     speed: [
@@ -91,5 +95,7 @@ export function getBoat(id) {
 }
 
 export function listBoats() {
-  return Object.values(BOATS).map((b) => ({ id: b.id, name: b.name, nogo: b.nogo }));
+  return Object.values(BOATS).map((b) => ({
+    id: b.id, name: b.name, nogo: b.nogo, motorKn: b.motorKn, source: b.source,
+  }));
 }

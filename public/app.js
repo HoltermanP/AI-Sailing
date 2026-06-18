@@ -23,15 +23,30 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 // ---- Boten laden ----
-fetch("/api/boats").then((r) => r.json()).then((d) => {
+const FALLBACK_BOATS = [
+  { id: "cruiser", name: "Cruising yacht (~36ft)", nogo: 32 },
+  { id: "racer", name: "Performance racer (~40ft)", nogo: 28 },
+];
+
+function fillBoats(boats) {
   const sel = $("boat");
-  d.boats.forEach((b) => {
+  sel.innerHTML = "";
+  boats.forEach((b) => {
     const o = document.createElement("option");
     o.value = b.id;
     o.textContent = `${b.name} (no-go ${b.nogo}°)`;
     sel.appendChild(o);
   });
-});
+}
+
+fetch("/api/boats")
+  .then((r) => r.json())
+  .then((d) => fillBoats(d.boats && d.boats.length ? d.boats : FALLBACK_BOATS))
+  .catch(() => {
+    // server even niet bereikbaar: gebruik ingebouwde lijst zodat selectie altijd werkt
+    fillBoats(FALLBACK_BOATS);
+    setStatus("Boot-lijst kon niet laden van server — standaardlijst gebruikt.", "busy");
+  });
 
 // ---- Vertrektijd standaard = nu (afgerond op uur, UTC) ----
 (function initDeparture() {

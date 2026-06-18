@@ -9,12 +9,24 @@
 
 import {
   distanceNM, bearing, destinationPoint, angleDiff,
-  vecFromSpeedDir, speedDirFromVec, normalizeBearing,
+  vecFromSpeedDir, speedDirFromVec, normalizeBearing, toRad,
 } from "./geo.js";
 import { polarSpeed } from "./polar.js";
 
+// Golf-snelheidscorrectie (heuristiek, GEEN VPP-fysica): hoge significante
+// golfhoogte remt af, het sterkst aan-de-wind. windward=1 bij TWA 0 (pal in de
+// wind), 0 bij TWA 180. Penalty per meter golf loopt van ~4%/m (voor de wind)
+// tot ~14%/m (aan de wind), afgetopt op 50%.
+export function waveFactor(twaDeg, hs) {
+  if (!hs || hs <= 0.25) return 1;
+  const windward = (1 + Math.cos(toRad(Math.min(180, Math.abs(twaDeg))))) / 2;
+  const penaltyPerMeter = 0.04 + 0.1 * windward;
+  const drag = Math.min(0.5, penaltyPerMeter * hs);
+  return 1 - drag;
+}
+
 // Punt-in-polygoon (ray casting). polygon: [[lat,lon], ...]
-function pointInPolygon(lat, lon, polygon) {
+export function pointInPolygon(lat, lon, polygon) {
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
     const [yi, xi] = polygon[i];
@@ -62,8 +74,14 @@ function advance(node, heading, dtHours, field) {
   const waterWindFrom = normalizeBearing(ww.dir + 180);
 
   const twa = Math.abs(angleDiff(waterWindFrom, heading));
-  const stw = polarSpeed(field.boat, twa, waterWindSpeed); // snelheid door water (kn)
-  if (stw <= 0.05) return null; // no-go: vaart te laag
+  const sailStw = polarSpeed(field.boat, twa, waterWindSpeed) * waveFactor(twa, cond.waveHeight);
+
+  // Motor-fallback: bij weinig wind kan op de motor sneller worden gevaren dan
+  // onder zeil. Effectieve vaart door water = max(zeil, motor) als motor aan staat.
+  const motorKn = field.useEngine ? (field.boat.motorKn || 0) : 0;
+  const motoring = motorKn > sailStw;
+  const stw = Math.max(sailStw, motorKn);
+  if (stw <= 0.05) return null; // no-go én geen motor: vaart te laag
 
   // Snelheid over de grond = bootvector (door water) + stroomvector
   const boatVec = vecFromSpeedDir(stw, heading);
@@ -88,6 +106,8 @@ function advance(node, heading, dtHours, field) {
       windSpeed: wind.speed,
       curSpeed: cur.speed,
       curToward: cur.towardDir,
+      waveHeight: cond.waveHeight || 0,
+      motoring,
     },
   };
 }
@@ -123,6 +143,7 @@ function reconstruct(node) {
 
 export function routeIsochrone({ start, end, field, boat, departureMs, zones = [], options = {} }) {
   field.boat = boat;
+  field.useEngine = options.useEngine ?? true; // motoren bij windstilte standaard aan
   const directDist = distanceNM(start, end);
 
   // Δt zo kiezen dat het aantal stappen redelijk blijft (~80-160).
@@ -138,6 +159,9 @@ export function routeIsochrone({ start, end, field, boat, departureMs, zones = [
 
   if (!field.isNavigable(start.lat, start.lon)) {
     throw new Error("Startpunt ligt niet op bevaarbaar water (of buiten datagebied).");
+  }
+  if (!field.isNavigable(end.lat, end.lon)) {
+    throw new Error("Bestemming ligt niet op bevaarbaar water (of buiten datagebied).");
   }
 
   let front = [startNode];
@@ -203,6 +227,8 @@ export function routeIsochrone({ start, end, field, boat, departureMs, zones = [
   const path = reconstruct(best);
   const totalDist = path.reduce((sum, n, i) => i === 0 ? 0 : sum + distanceNM(path[i - 1], n), 0);
   const durationH = (best.timeMs - departureMs) / 3600000;
+  const legs = path.filter((n) => n.leg);
+  const motorLegs = legs.filter((n) => n.leg.motoring).length;
 
   return {
     waypoints: path.map((n) => ({
@@ -218,6 +244,8 @@ export function routeIsochrone({ start, end, field, boat, departureMs, zones = [
         windSpeed: +n.leg.windSpeed.toFixed(1),
         curSpeed: +n.leg.curSpeed.toFixed(2),
         curToward: +n.leg.curToward.toFixed(0),
+        waveHeight: +(n.leg.waveHeight || 0).toFixed(2),
+        motoring: !!n.leg.motoring,
       } : {}),
     })),
     isochrones: isochrones.filter((_, i) => i % Math.max(1, Math.floor(isochrones.length / 25)) === 0),
@@ -230,6 +258,8 @@ export function routeIsochrone({ start, end, field, boat, departureMs, zones = [
       avgSpeedKn: +(totalDist / Math.max(0.01, durationH)).toFixed(2),
       steps: isochrones.length,
       dtHours,
+      motorLegs,
+      motorFraction: legs.length ? +(motorLegs / legs.length).toFixed(2) : 0,
     },
   };
 }

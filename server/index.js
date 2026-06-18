@@ -20,14 +20,27 @@ app.get("/api/boats", (req, res) => {
 
 app.post("/api/route", async (req, res) => {
   try {
-    const { start, end, boatId = "cruiser", departure, zones = [] } = req.body || {};
+    const { start, end, boatId = "cruiser", departure, zones = [], useEngine = true } = req.body || {};
     if (!start || !end || start.lat == null || end.lat == null) {
       return res.status(400).json({ error: "start en end (met lat/lon) zijn verplicht." });
+    }
+    for (const [name, p] of [["start", start], ["end", end]]) {
+      if (Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180) {
+        return res.status(400).json({ error: `Ongeldige coördinaten voor ${name}.` });
+      }
     }
     const boat = getBoat(boatId);
     const departureMs = departure ? Date.parse(departure) : Date.now();
     if (Number.isNaN(departureMs)) {
       return res.status(400).json({ error: "Ongeldige vertrektijd." });
+    }
+    // Forecast-venster: Open-Meteo levert ~recent verleden t/m ~16 dagen vooruit.
+    const now = Date.now();
+    if (departureMs < now - 2 * 24 * 3600 * 1000) {
+      return res.status(400).json({ error: "Vertrektijd ligt te ver in het verleden voor een voorspelling." });
+    }
+    if (departureMs > now + 15 * 24 * 3600 * 1000) {
+      return res.status(400).json({ error: "Vertrektijd ligt voorbij de voorspellingshorizon (~16 dagen)." });
     }
 
     const directDist = distanceNM(start, end);
@@ -49,7 +62,7 @@ app.post("/api/route", async (req, res) => {
     const fetchMs = Date.now() - t0;
 
     const t1 = Date.now();
-    const result = routeIsochrone({ start, end, field, boat, departureMs, zones });
+    const result = routeIsochrone({ start, end, field, boat, departureMs, zones, options: { useEngine } });
     const computeMs = Date.now() - t1;
 
     res.json({

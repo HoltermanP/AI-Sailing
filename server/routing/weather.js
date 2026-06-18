@@ -59,6 +59,7 @@ export class WeatherField {
     this.windFrom = [];  // [latIdx][lonIdx][timeIdx] -> graden (waar wind vandaan komt)
     this.curSpeed = [];  // kn
     this.curToward = []; // graden (waar stroom heen gaat)
+    this.waveHeight = []; // significante golfhoogte (m)
   }
 
   // Geef grid-indices + fracties voor een lat/lon (bilineair)
@@ -123,6 +124,7 @@ export class WeatherField {
       return lerpAngle(a, b, dt);
     };
 
+    // Bilineaire interpolatie van een scalair veld (ontbrekende cellen -> 0).
     const bilinScalar = (field) => {
       const v00 = sample(field, i0, j0), v01 = sample(field, i0, j1);
       const v10 = sample(field, i1, j0), v11 = sample(field, i1, j1);
@@ -148,11 +150,43 @@ export class WeatherField {
 
     const wind = bilinVector(this.windSpeed, this.windFrom);
     const cur = bilinVector(this.curSpeed, this.curToward);
+    const wave = bilinScalar(this.waveHeight);
     return {
       wind: { speed: wind.speed, fromDir: wind.dir },
       current: { speed: cur.speed, towardDir: cur.dir },
+      waveHeight: wave, // m (0 als geen data)
     };
   }
+}
+
+// Synthetisch veld met constante (of zelf opgegeven) omstandigheden. Bruikbaar
+// voor tests en als "handmatige invoer"-modus zonder externe API.
+export function makeUniformField({
+  bbox, departureMs = 0, hours = 48, gridN = 6,
+  windSpeed = 12, windFrom = 225, curSpeed = 0, curToward = 0, waveHeight = 0,
+  landFn = null, // (lat,lon) => true als land
+}) {
+  const lats = [], lons = [], times = [];
+  for (let i = 0; i < gridN; i++) {
+    lats.push(bbox.minLat + ((bbox.maxLat - bbox.minLat) * i) / (gridN - 1));
+    lons.push(bbox.minLon + ((bbox.maxLon - bbox.minLon) * i) / (gridN - 1));
+  }
+  for (let h = 0; h <= hours; h++) times.push(departureMs + h * 3600 * 1000);
+  const f = new WeatherField({ bbox, gridN, lats, lons, times, departureMs });
+  for (let i = 0; i < gridN; i++) {
+    f.elevation[i] = []; f.windSpeed[i] = []; f.windFrom[i] = [];
+    f.curSpeed[i] = []; f.curToward[i] = []; f.waveHeight[i] = [];
+    for (let j = 0; j < gridN; j++) {
+      const land = landFn ? landFn(lats[i], lons[j]) : false;
+      f.elevation[i][j] = land ? 50 : -10;
+      f.windSpeed[i][j] = times.map(() => windSpeed);
+      f.windFrom[i][j] = times.map(() => windFrom);
+      f.curSpeed[i][j] = times.map(() => curSpeed);
+      f.curToward[i][j] = times.map(() => curToward);
+      f.waveHeight[i][j] = times.map(() => waveHeight);
+    }
+  }
+  return f;
 }
 
 // Bouw en vul een WeatherField voor de gegeven bounding box en tijdsvenster.
@@ -178,6 +212,7 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
     field.windFrom[i] = new Array(gridN).fill(null);
     field.curSpeed[i] = new Array(gridN).fill(null);
     field.curToward[i] = new Array(gridN).fill(null);
+    field.waveHeight[i] = new Array(gridN).fill(null);
   }
 
   const startDate = new Date(departureMs).toISOString().slice(0, 10);
@@ -228,7 +263,7 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
     const latStr = batch.map((c) => c.lat.toFixed(4)).join(",");
     const lonStr = batch.map((c) => c.lon.toFixed(4)).join(",");
     const url = `${MARINE_URL}?latitude=${latStr}&longitude=${lonStr}` +
-      `&hourly=ocean_current_velocity,ocean_current_direction` +
+      `&hourly=ocean_current_velocity,ocean_current_direction,wave_height` +
       `&start_date=${startDate}&end_date=${endDate}&timezone=UTC`;
     try {
       const data = asArray(await fetchJson(url));
@@ -239,6 +274,7 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
         // km/h -> kn; null laten staan (geen stroomdata => 0 in interpolatie)
         field.curSpeed[c.i][c.j] = (h.ocean_current_velocity || []).map((v) => (v == null ? null : v * KMH_TO_KN));
         field.curToward[c.i][c.j] = h.ocean_current_direction || null;
+        field.waveHeight[c.i][c.j] = h.wave_height || null;
       });
     } catch (e) {
       // geen stroomdata beschikbaar voor dit gebied — laat null (=> 0)
