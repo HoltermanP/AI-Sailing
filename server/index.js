@@ -26,6 +26,9 @@ app.use((req, res, next) => {
   next();
 });
 
+// Statische frontend (index.html, app.js, style.css).
+app.use(express.static(path.join(__dirname, "..", "public")));
+
 const MAX_FORECAST_HOURS = 240; // grens van bruikbare voorspelling
 const forecastCache = new TtlCache({ ttlMs: config.cacheTtlMs, maxEntries: config.cacheMaxEntries });
 
