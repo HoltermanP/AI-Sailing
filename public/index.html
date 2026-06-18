@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI-Sailing · Weather Routing</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header>
+        <h1>⛵ AI-Sailing</h1>
+        <p class="tagline">Optimale route met wind, getijstroming &amp; vaarregels</p>
+      </header>
+
+      <section class="panel">
+        <h2>1 · Route</h2>
+        <div class="route-points">
+          <button id="setStart" class="pt-btn active" data-mode="start">
+            <span class="dot start"></span> Start (A)
+            <span id="startCoord" class="coord">— klik op kaart</span>
+          </button>
+          <button id="setEnd" class="pt-btn" data-mode="end">
+            <span class="dot end"></span> Bestemming (B)
+            <span id="endCoord" class="coord">— klik op kaart</span>
+          </button>
+        </div>
+        <p class="hint" id="modeHint">Klik op de kaart om het <b>startpunt</b> te plaatsen.</p>
+      </section>
+
+      <section class="panel">
+        <h2>2 · Boot &amp; vertrek</h2>
+        <label>Boottype
+          <select id="boat"></select>
+        </label>
+        <label>Vertrektijd (UTC)
+          <input type="datetime-local" id="departure" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>3 · Beperkingen</h2>
+        <button id="drawZone" class="secondary">+ Verboden zone tekenen</button>
+        <button id="clearZones" class="secondary ghost">Zones wissen</button>
+        <p class="hint">Klik punten op de kaart, dubbelklik om de zone te sluiten. De router vermijdt deze gebieden (bv. natuurgebied, TSS, ondiepte).</p>
+        <ul id="zoneList"></ul>
+      </section>
+
+      <button id="compute" class="primary">Bereken optimale route</button>
+      <div id="status"></div>
+
+      <section id="result" class="panel result hidden">
+        <h2>Resultaat</h2>
+        <div id="summary"></div>
+        <h3>Beenstukken (tacks &amp; koerswijzigingen)</h3>
+        <div class="legs-wrap"><table id="legs"></table></div>
+      </section>
+
+      <footer>
+        <small>Data: Open-Meteo · isochronen-routing · prototype, niet voor navigatie</small>
+      </footer>
+    </aside>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
