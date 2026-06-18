@@ -1,0 +1,22 @@
+AI-Sailing — end-to-end smoke test
+Route: IJmuiden (52.47,4.45) -> Lowestoft (52.47,1.80)
+Vertrek: 2026-06-18T10:00Z | Databron: Open-Meteo (live forecast)
+
+== Heavy bluewater (motor aan) ==
+  schip:        Heavy bluewater cruiser (~45ft)
+  afstand:      99.6 NM (direct 96.9 NM, omweg 1.03)
+  reistijd:     14.51 u | gem 6.86 kn
+  ETA:          2026-06-19T00:30:48.091Z
+  onder motor:  100% | tacks/gijpen: 1
+  grid:         gridN 16 | fetchMs 785 | computeMs 1288 | cacheHit false
+  waypoints:    59
+
+== Performance racer (alleen zeil) ==
+  schip:        Performance racer (~40ft)
+  afstand:      100.7 NM (direct 96.9 NM, omweg 1.04)
+  reistijd:     14.03 u | gem 7.18 kn
+  ETA:          2026-06-19T00:01:40.982Z
+  onder motor:  0% | tacks/gijpen: 4
+  grid:         gridN 16 | fetchMs 1 | computeMs 1172 | cacheHit true
+  waypoints:    57
+

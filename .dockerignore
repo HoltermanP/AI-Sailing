@@ -1,0 +1,8 @@
+node_modules
+.git
+test
+docs
+*.log
+.env
+.env.local
+eslint.config.js

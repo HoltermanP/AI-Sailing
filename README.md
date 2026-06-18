@@ -18,9 +18,26 @@ stroming mee te liften ontstaat de tijd-optimale route.
 
 ```bash
 npm install
-npm start
-# open http://localhost:3000
+npm start                 # open http://localhost:3000  (health: /health)
 ```
+
+### Scripts
+
+```bash
+npm test          # node:test — geo, polairen, offline solver-gedrag
+npm run typecheck # syntax-check alle modules
+npm run lint      # eslint
+npm run dev       # auto-herstart bij wijzigingen
+```
+
+### Configuratie
+
+Alle instellingen via env-vars (zie [.env.example](.env.example)) — **geen verplichte secrets**.
+Lokaal met een `.env`: `node --env-file=.env server/index.js`. Zie [AUDIT.md](AUDIT.md)
+voor de volledige env-checklist en deploy-stappen.
+
+Vier selecteerbare schepen (`synthetic_baseline`-polairen): cruiser, performance
+cruiser, heavy bluewater, performance racer — elk met motor-fallback voor windstilte.
 
 Gebruik:
 1. Klik op de kaart voor **Start (A)** en daarna **Bestemming (B)**.
