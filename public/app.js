@@ -211,7 +211,7 @@ function drawResult(data) {
 
   // tack-markers waar de koers sterk verandert
   let prevCog = null;
-  data.waypoints.forEach((w, i) => {
+  data.waypoints.forEach((w) => {
     if (w.cog == null) return;
     if (prevCog != null && Math.abs(angleDelta(w.cog, prevCog)) > 30) {
       L.circleMarker([w.lat, w.lon], { radius: 3.5, color: "#2dd4bf", fillOpacity: 1 })

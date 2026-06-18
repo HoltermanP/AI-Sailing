@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { makeUniformField } from "../server/routing/weather.js";
 import { routeIsochrone, waveFactor, pointInPolygon } from "../server/routing/isochrone.js";
 import { getBoat } from "../server/routing/polar.js";
-import { boundingBox, distanceNM } from "../server/routing/geo.js";
+import { boundingBox } from "../server/routing/geo.js";
 
 const boat = getBoat("cruiser");
 const bbox = boundingBox([{ lat: 51.5, lon: 2.5 }, { lat: 53.5, lon: 5.0 }], 0.5);
@@ -77,7 +77,7 @@ test("landvermijding: route om een landblok heen is langer dan direct", () => {
 });
 
 test("bestemming op land => duidelijke fout", () => {
-  const landFn = (lat, lon) => lat > 52.9; // noordrand is land
+  const landFn = (lat) => lat > 52.9; // noordrand is land
   const field = makeUniformField({ bbox, windSpeed: 12, landFn });
   assert.throws(() => routeIsochrone({
     start: { lat: 52.0, lon: 3.7 }, end: { lat: 53.2, lon: 3.7 },

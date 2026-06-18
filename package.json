@@ -8,7 +8,7 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "test": "node --test test/",
-    "typecheck": "node --check server/index.js && node --check server/routing/geo.js && node --check server/routing/polar.js && node --check server/routing/weather.js && node --check server/routing/isochrone.js && node --check public/app.js",
+    "typecheck": "for f in server/index.js server/config.js server/logger.js server/cache.js server/routing/*.js public/app.js; do node --check \"$f\" || exit 1; done",
     "lint": "eslint ."
   },
   "engines": {
@@ -16,5 +16,10 @@
   },
   "dependencies": {
     "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
+    "globals": "^17.6.0"
   }
 }

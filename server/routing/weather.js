@@ -23,13 +23,39 @@ function chunk(arr, size) {
   return out;
 }
 
-async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Open-Meteo ${res.status}: ${body.slice(0, 200)}`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Fetch met timeout en retries-met-backoff. Herhaalt bij 429/5xx en netwerk-
+// fouten; respecteert Retry-After. Gooit een nette fout na het laatste pogen.
+async function fetchJson(url, { timeoutMs = 15000, retries = 3 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (res.ok) return await res.json();
+
+      const retryable = res.status === 429 || res.status >= 500;
+      const body = await res.text().catch(() => "");
+      lastErr = new Error(`Open-Meteo ${res.status}: ${body.slice(0, 160)}`);
+      if (!retryable || attempt === retries) throw lastErr;
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const backoff = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : Math.min(8000, 500 * 2 ** attempt);
+      await sleep(backoff);
+    } catch (err) {
+      clearTimeout(timer);
+      lastErr = err.name === "AbortError"
+        ? new Error(`Open-Meteo timeout na ${timeoutMs}ms`)
+        : err;
+      if (attempt === retries) throw lastErr;
+      await sleep(Math.min(8000, 500 * 2 ** attempt));
+    }
   }
-  return res.json();
+  throw lastErr;
 }
 
 // Open-Meteo geeft bij meerdere coördinaten een array terug, bij één een object.
@@ -229,7 +255,7 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
       batch.forEach((c, idx) => {
         field.elevation[c.i][c.j] = elev[idx] != null ? elev[idx] : 9999;
       });
-    } catch (e) {
+    } catch {
       // bij fout: behoudend als water markeren zodat routing niet vastloopt
       batch.forEach((c) => { field.elevation[c.i][c.j] = 0; });
     }
@@ -276,7 +302,7 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
         field.curToward[c.i][c.j] = h.ocean_current_direction || null;
         field.waveHeight[c.i][c.j] = h.wave_height || null;
       });
-    } catch (e) {
+    } catch {
       // geen stroomdata beschikbaar voor dit gebied — laat null (=> 0)
     }
   }

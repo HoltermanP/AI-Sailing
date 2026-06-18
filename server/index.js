@@ -2,23 +2,75 @@ import express from "express";
 import { fileURLToPath } from "url";
 import path from "path";
 
+import { config, validateConfig } from "./config.js";
+import { log } from "./logger.js";
+import { TtlCache } from "./cache.js";
 import { boundingBox, distanceNM } from "./routing/geo.js";
 import { buildWeatherField } from "./routing/weather.js";
 import { routeIsochrone } from "./routing/isochrone.js";
 import { getBoat, listBoats } from "./routing/polar.js";
 
+validateConfig();
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.disable("x-powered-by");
+app.use(express.json({ limit: "256kb" }));
+
+// Request-logging (structured).
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on("finish", () => {
+    log.info("http", { method: req.method, path: req.path, status: res.statusCode, ms: Date.now() - t0 });
+  });
+  next();
+});
 
 const MAX_FORECAST_HOURS = 240; // grens van bruikbare voorspelling
+const forecastCache = new TtlCache({ ttlMs: config.cacheTtlMs, maxEntries: config.cacheMaxEntries });
+
+// ---- Eenvoudige in-memory rate limiter per IP ----
+const rateBuckets = new Map(); // ip -> { count, resetAt }
+function rateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  let b = rateBuckets.get(ip);
+  if (!b || now > b.resetAt) {
+    b = { count: 0, resetAt: now + config.rateWindowMs };
+    rateBuckets.set(ip, b);
+  }
+  b.count++;
+  if (b.count > config.rateMax) {
+    const retryAfter = Math.ceil((b.resetAt - now) / 1000);
+    res.set("Retry-After", String(retryAfter));
+    return res.status(429).json({ error: `Te veel verzoeken. Probeer over ${retryAfter}s opnieuw.` });
+  }
+  next();
+}
+
+// ---- Optionele API-key (alleen actief als config.apiKey gezet is) ----
+function requireApiKey(req, res, next) {
+  if (!config.apiKey) return next();
+  if (req.get("x-api-key") === config.apiKey) return next();
+  return res.status(401).json({ error: "Ongeldige of ontbrekende API-key." });
+}
+
+// ---- Health endpoint ----
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    uptimeS: Math.round(process.uptime()),
+    cache: forecastCache.stats(),
+    boats: listBoats().length,
+    authRequired: !!config.apiKey,
+  });
+});
 
 app.get("/api/boats", (req, res) => {
   res.json({ boats: listBoats() });
 });
 
-app.post("/api/route", async (req, res) => {
+app.post("/api/route", rateLimit, requireApiKey, async (req, res) => {
   try {
     const { start, end, boatId = "cruiser", departure, zones = [], useEngine = true } = req.body || {};
     if (!start || !end || start.lat == null || end.lat == null) {
@@ -28,6 +80,9 @@ app.post("/api/route", async (req, res) => {
       if (Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180) {
         return res.status(400).json({ error: `Ongeldige coördinaten voor ${name}.` });
       }
+    }
+    if (!Array.isArray(zones) || zones.length > 50) {
+      return res.status(400).json({ error: "zones moet een lijst van max 50 gebieden zijn." });
     }
     const boat = getBoat(boatId);
     const departureMs = departure ? Date.parse(departure) : Date.now();
@@ -44,6 +99,9 @@ app.post("/api/route", async (req, res) => {
     }
 
     const directDist = distanceNM(start, end);
+    if (directDist > config.maxRouteNM) {
+      return res.status(400).json({ error: `Route te lang (${Math.round(directDist)} NM > limiet ${config.maxRouteNM} NM).` });
+    }
     // marge in graden (1° ≈ 60 NM): ~30% van de reisafstand, begrensd,
     // zodat opkruisen/omvaren binnen het datagrid blijft maar het grid fijn genoeg blijft.
     const margin = Math.min(2, Math.max(0.25, (directDist / 60) * 0.3));
@@ -57,33 +115,54 @@ app.post("/api/route", async (req, res) => {
     const span = Math.max(bbox.maxLat - bbox.minLat, bbox.maxLon - bbox.minLon);
     const gridN = Math.max(8, Math.min(16, Math.round(span * 6)));
 
+    // Forecast-cache: sleutel op afgerond gebied + grid + vertrek-uur + venster.
+    const hourBucket = Math.floor(departureMs / (3600 * 1000));
+    const cacheKey = JSON.stringify({
+      b: [bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon].map((v) => v.toFixed(2)),
+      gridN, hourBucket, hoursNeeded,
+    });
+
     const t0 = Date.now();
-    const field = await buildWeatherField({ bbox, departureMs, hoursNeeded, gridN });
+    let field = forecastCache.get(cacheKey);
+    const cacheHit = !!field;
+    if (!field) {
+      field = await buildWeatherField({ bbox, departureMs, hoursNeeded, gridN });
+      forecastCache.set(cacheKey, field);
+    }
     const fetchMs = Date.now() - t0;
 
     const t1 = Date.now();
     const result = routeIsochrone({ start, end, field, boat, departureMs, zones, options: { useEngine } });
     const computeMs = Date.now() - t1;
 
+    log.info("route", {
+      boat: boat.id, directDist: +directDist.toFixed(1), dist: result.summary.distanceNM,
+      durationH: result.summary.durationHours, cacheHit, fetchMs, computeMs,
+    });
+
     res.json({
       ...result,
       meta: {
         boat: { id: boat.id, name: boat.name },
-        bbox,
-        gridN,
-        fetchMs,
-        computeMs,
+        bbox, gridN, fetchMs, computeMs, cacheHit,
         forecastHoursFetched: hoursNeeded,
         truncatedForecast: estHours > MAX_FORECAST_HOURS,
       },
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message || "Routeberekening mislukt." });
+    log.error("route_failed", { msg: err.message });
+    res.status(502).json({ error: err.message || "Routeberekening mislukt." });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`AI-sailing draait op http://localhost:${PORT}`);
+const server = app.listen(config.port, () => {
+  log.info("server_start", { url: `http://localhost:${config.port}`, authRequired: !!config.apiKey });
 });
+
+// Nette shutdown.
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    log.info("server_stop", { signal: sig });
+    server.close(() => process.exit(0));
+  });
+}
