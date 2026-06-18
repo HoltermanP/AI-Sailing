@@ -22,6 +22,19 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+// Veilig JSON lezen: bij een niet-JSON antwoord (bv. HTML-foutpagina) geven we
+// een duidelijke fout i.p.v. de cryptische "string did not match the expected
+// pattern" die sommige browsers bij res.json() op niet-JSON gooien.
+async function parseJsonSafe(res) {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Server gaf een onverwacht antwoord (HTTP ${res.status}).`);
+  }
+}
+
 // ---- Boten laden ----
 const FALLBACK_BOATS = [
   { id: "cruiser", name: "Cruising yacht (~36ft)", nogo: 32 },
@@ -40,7 +53,7 @@ function fillBoats(boats) {
 }
 
 fetch("/api/boats")
-  .then((r) => r.json())
+  .then((r) => parseJsonSafe(r))
   .then((d) => fillBoats(d.boats && d.boats.length ? d.boats : FALLBACK_BOATS))
   .catch(() => {
     // server even niet bereikbaar: gebruik ingebouwde lijst zodat selectie altijd werkt
@@ -151,11 +164,18 @@ async function computeRoute() {
     setStatus("Plaats eerst start (A) én bestemming (B).", "error");
     return;
   }
+  // Vertrektijd: datetime-local levert "YYYY-MM-DDTHH:MM". Bij lege/ongeldige
+  // waarde (bv. browser zonder datetime-local-ondersteuning) vallen we terug op nu.
+  const depVal = $("departure").value;
+  const departure = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(depVal)
+    ? depVal + ":00Z"
+    : new Date().toISOString();
+
   const body = {
     start: state.start,
     end: state.end,
     boatId: $("boat").value,
-    departure: $("departure").value + ":00Z",
+    departure,
     zones: state.zones,
     useEngine: $("useEngine").checked,
   };
@@ -170,8 +190,8 @@ async function computeRoute() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Onbekende fout");
+    const data = await parseJsonSafe(res);
+    if (!res.ok) throw new Error(data.error || `Serverfout (HTTP ${res.status}).`);
     state.hasRoute = true;
     drawResult(data);
     setStatus(`Klaar in ${(data.meta.fetchMs + data.meta.computeMs) / 1000}s.`, "ok");

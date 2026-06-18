@@ -155,6 +155,23 @@ app.post("/api/route", rateLimit, requireApiKey, async (req, res) => {
   }
 });
 
+// Onbekende API-route → JSON 404 (geen HTML-foutpagina; client kan dit parsen).
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `Onbekende route: ${req.method} ${req.originalUrl}` });
+});
+
+// Centrale error-handler → ALTIJD JSON (vangt o.a. misvormde body / te grote payload).
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const status = err.status || err.statusCode || 500;
+  const msg =
+    err.type === "entity.parse.failed" ? "Ongeldige JSON in verzoek." :
+    err.type === "entity.too.large" ? "Verzoek te groot." :
+    (status >= 500 ? "Serverfout." : err.message);
+  log.error("unhandled", { msg: err.message, status });
+  res.status(status).json({ error: msg });
+});
+
 const server = app.listen(config.port, () => {
   log.info("server_start", { url: `http://localhost:${config.port}`, authRequired: !!config.apiKey });
 });
