@@ -73,31 +73,85 @@ function setMode(mode) {
   state.mode = mode;
   $("setStart").classList.toggle("active", mode === "start");
   $("setEnd").classList.toggle("active", mode === "end");
-  $("modeHint").innerHTML =
-    mode === "start"
-      ? "Klik op de kaart om het <b>startpunt</b> te plaatsen."
+  if (mode === "start") {
+    $("modeHint").innerHTML = state.start
+      ? "Klik op het water om het <b>startpunt</b> te verplaatsen, of sleep marker A."
+      : "Klik op de kaart om het <b>startpunt</b> te plaatsen.";
+  } else {
+    $("modeHint").innerHTML = state.end
+      ? "Klik op het water om de <b>bestemming</b> te verplaatsen, of sleep marker B."
       : "Klik op de kaart om de <b>bestemming</b> te plaatsen.";
+  }
 }
 $("setStart").onclick = () => setMode("start");
 $("setEnd").onclick = () => setMode("end");
 
 function fmt(c) { return `${c.lat.toFixed(3)}, ${c.lon.toFixed(3)}`; }
 
+function clearRouteVisualization() {
+  state.hasRoute = false;
+  state.routeLayer.clearLayers();
+  state.isoLayer.clearLayers();
+  $("result").classList.add("hidden");
+  $("explanationPanel").classList.add("hidden");
+  $("explanation").textContent = "";
+  $("summary").innerHTML = "";
+  $("legs").innerHTML = "";
+}
+
+function bindMarkerDrag(marker, which) {
+  marker.on("dragend", () => {
+    const ll = marker.getLatLng();
+    const c = { lat: ll.lat, lon: ll.lng };
+    if (which === "start") {
+      state.start = c;
+      $("startCoord").textContent = fmt(c);
+    } else {
+      state.end = c;
+      $("endCoord").textContent = fmt(c);
+    }
+    clearRouteVisualization();
+    setStatus("", "");
+  });
+}
+
 function placePoint(latlng) {
   const c = { lat: latlng.lat, lon: latlng.lng };
+  clearRouteVisualization();
   if (state.mode === "start") {
     state.start = c;
-    if (state.startMarker) state.startMarker.setLatLng(latlng);
-    else state.startMarker = L.marker(latlng, { title: "Start" }).addTo(map).bindTooltip("A");
-    state.startMarker.setLatLng(latlng);
+    if (state.startMarker) {
+      state.startMarker.setLatLng(latlng);
+      if (state.startMarker.dragging) state.startMarker.dragging.enable();
+    } else {
+      state.startMarker = L.marker(latlng, { title: "Start", draggable: true }).addTo(map).bindTooltip("A");
+      bindMarkerDrag(state.startMarker, "start");
+    }
     $("startCoord").textContent = fmt(c);
     setMode("end");
   } else {
     state.end = c;
-    if (state.endMarker) state.endMarker.setLatLng(latlng);
-    else state.endMarker = L.marker(latlng, { title: "Bestemming" }).addTo(map).bindTooltip("B");
-    state.endMarker.setLatLng(latlng);
+    if (state.endMarker) {
+      state.endMarker.setLatLng(latlng);
+      if (state.endMarker.dragging) state.endMarker.dragging.enable();
+    } else {
+      state.endMarker = L.marker(latlng, { title: "Bestemming", draggable: true }).addTo(map).bindTooltip("B");
+      bindMarkerDrag(state.endMarker, "end");
+    }
     $("endCoord").textContent = fmt(c);
+    setMode("end");
+  }
+}
+
+function hintForRouteError(message) {
+  if (/startpunt/i.test(message)) {
+    setMode("start");
+    $("modeHint").innerHTML = "Het startpunt ligt op land. Klik op het <b>water</b> of sleep marker A.";
+    return;
+  }
+  if (/bestemming/i.test(message)) {
+    setMode("end");
+    $("modeHint").innerHTML = "De bestemming ligt op land. Klik op het <b>water</b> of sleep marker B.";
   }
 }
 
@@ -235,6 +289,8 @@ async function computeRoute() {
     setStatus(`Klaar in ${(data.meta.fetchMs + data.meta.computeMs) / 1000}s.`, "ok");
   } catch (err) {
     setStatus("Fout: " + err.message, "error");
+    hintForRouteError(err.message);
+    if (isMobileLayout()) setPanelExpanded(true);
   } finally {
     $("compute").disabled = false;
   }
