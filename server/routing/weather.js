@@ -9,6 +9,8 @@
 // routing-engine voor elk punt/tijdstip een schatting van de omstandigheden krijgt.
 
 import { toRad, toDeg, normalizeBearing } from "./geo.js";
+import { config } from "../config.js";
+import { log } from "../logger.js";
 
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const MARINE_URL = "https://marine-api.open-meteo.com/v1/marine";
@@ -16,6 +18,8 @@ const ELEVATION_URL = "https://api.open-meteo.com/v1/elevation";
 
 const KMH_TO_KN = 0.539957;
 const SEA_LEVEL_THRESHOLD_M = 0.5; // hoogte hieronder => bevaarbaar water
+const LAND_CORNER_THRESHOLD_M = 25; // hoekcel boven deze hoogte telt als land
+const ELEVATION_MISSING = 9000; // sentinel voor ontbrekende/ongeldige hoogtedata
 
 function chunk(arr, size) {
   const out = [];
@@ -25,11 +29,79 @@ function chunk(arr, size) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Fetch met timeout en retries-met-backoff. Herhaalt bij 429/5xx en netwerk-
-// fouten; respecteert Retry-After. Gooit een nette fout na het laatste pogen.
-async function fetchJson(url, { timeoutMs = 15000, retries = 3 } = {}) {
+// Globale throttling: Open-Meteo free tier heeft een strikt minutenlimiet.
+let lastOpenMeteoFetchAt = 0;
+let openMeteoBlockedUntil = 0;
+const elevationCache = new Map(); // "lat,lon" -> { elev, expires }
+
+export class OpenMeteoRateLimitError extends Error {
+  constructor(message, retryAfterMs = 0) {
+    super(message);
+    this.name = "OpenMeteoRateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+export function isOpenMeteoBlocked() {
+  return Date.now() < openMeteoBlockedUntil;
+}
+
+function elevCacheKey(lat, lon) {
+  return `${lat.toFixed(3)},${lon.toFixed(3)}`;
+}
+
+function getCachedElevation(lat, lon) {
+  const e = elevationCache.get(elevCacheKey(lat, lon));
+  if (!e || Date.now() > e.expires) return null;
+  if (e.elev >= ELEVATION_MISSING) return null; // mislukte eerdere fetch niet hergebruiken
+  return e.elev;
+}
+
+function setCachedElevation(lat, lon, elev) {
+  elevationCache.set(elevCacheKey(lat, lon), {
+    elev,
+    expires: Date.now() + config.elevationCacheTtlMs,
+  });
+}
+
+function parse429(body) {
+  try {
+    const reason = JSON.parse(body).reason || "";
+    if (/next hour|hourly api/i.test(reason)) {
+      return { kind: "hourly", waitMs: 3600_000 };
+    }
+    if (/one minute|60 second|minutely api/i.test(reason)) {
+      return { kind: "minute", waitMs: config.openMeteo429WaitMs };
+    }
+  } catch { /* ignore */ }
+  return { kind: "minute", waitMs: config.openMeteo429WaitMs };
+}
+
+function retryWaitMs(status, body, attempt) {
+  if (status === 429) return parse429(body).waitMs;
+  return Math.min(8000, 500 * 2 ** attempt);
+}
+
+async function throttleOpenMeteo() {
+  const wait = lastOpenMeteoFetchAt + config.openMeteoMinIntervalMs - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastOpenMeteoFetchAt = Date.now();
+}
+
+// Fetch met timeout, throttling en beperkte retries. Bij uur-limiet: direct falen.
+async function fetchJson(url, { timeoutMs = 15000, retries = config.openMeteoMaxRetries } = {}) {
+  if (isOpenMeteoBlocked()) {
+    const waitMs = openMeteoBlockedUntil - Date.now();
+    throw new OpenMeteoRateLimitError(
+      "Weer-API (Open-Meteo) is tijdelijk overbelast. Probeer over enkele minuten opnieuw.",
+      waitMs,
+    );
+  }
+
   let lastErr;
+  let waited429 = false;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    await throttleOpenMeteo();
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -37,22 +109,37 @@ async function fetchJson(url, { timeoutMs = 15000, retries = 3 } = {}) {
       clearTimeout(timer);
       if (res.ok) return await res.json();
 
-      const retryable = res.status === 429 || res.status >= 500;
       const body = await res.text().catch(() => "");
+      const retryable = res.status === 429 || res.status >= 500;
       lastErr = new Error(`Open-Meteo ${res.status}: ${body.slice(0, 160)}`);
+
+      if (res.status === 429) {
+        const parsed = parse429(body);
+        if (parsed.kind === "hourly") {
+          openMeteoBlockedUntil = Date.now() + parsed.waitMs;
+          throw new OpenMeteoRateLimitError(
+            "Weer-API daglimiet bereikt (Open-Meteo). Probeer over ~1 uur opnieuw.",
+            parsed.waitMs,
+          );
+        }
+        if (waited429 || attempt === retries) throw lastErr;
+        log.warn("open_meteo_429", { waitMs: parsed.waitMs, attempt: attempt + 1 });
+        await sleep(parsed.waitMs);
+        waited429 = true;
+        continue;
+      }
+
       if (!retryable || attempt === retries) throw lastErr;
-      const retryAfter = Number(res.headers.get("retry-after"));
-      const backoff = Number.isFinite(retryAfter) && retryAfter > 0
-        ? retryAfter * 1000
-        : Math.min(8000, 500 * 2 ** attempt);
-      await sleep(backoff);
+      await sleep(retryWaitMs(res.status, body, attempt));
     } catch (err) {
       clearTimeout(timer);
+      if (err instanceof OpenMeteoRateLimitError) throw err;
+      if (err.message?.startsWith("Open-Meteo")) throw err;
       lastErr = err.name === "AbortError"
         ? new Error(`Open-Meteo timeout na ${timeoutMs}ms`)
         : err;
       if (attempt === retries) throw lastErr;
-      await sleep(Math.min(8000, 500 * 2 ** attempt));
+      await sleep(retryWaitMs(0, "", attempt));
     }
   }
   throw lastErr;
@@ -114,16 +201,48 @@ export class WeatherField {
     return { k0: last, k1: last, dt: 0 };
   }
 
+  elevationAt(lat, lon) {
+    const { i0, i1, j0, j1, di, dj } = this._spatialIndex(lat, lon);
+    const v00 = this.elevation[i0][j0];
+    const v01 = this.elevation[i0][j1];
+    const v10 = this.elevation[i1][j0];
+    const v11 = this.elevation[i1][j1];
+    const corners = [v00, v01, v10, v11];
+    if (corners.some((v) => v == null || v >= ELEVATION_MISSING)) return null;
+    const a = v00 * (1 - dj) + v01 * dj;
+    const b = v10 * (1 - dj) + v11 * dj;
+    return a * (1 - di) + b * di;
+  }
+
+  // Is dit punt op water? null = hoogte onbekend (geen data).
+  // Nearest-grid-node i.p.v. bilineair: voorkomt vals-land bij klik op water nabij kust.
+  isWaterAt(lat, lon) {
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    lat = clamp(lat, this.lats[0], this.lats[this.lats.length - 1]);
+    lon = clamp(lon, this.lons[0], this.lons[this.lons.length - 1]);
+    const fi = ((lat - this.lats[0]) / (this.lats[this.lats.length - 1] - this.lats[0])) * (this.lats.length - 1);
+    const fj = ((lon - this.lons[0]) / (this.lons[this.lons.length - 1] - this.lons[0])) * (this.lons.length - 1);
+    const i = Math.round(fi);
+    const j = Math.round(fj);
+    const e = this.elevation[i]?.[j];
+    if (e == null || e >= ELEVATION_MISSING) return null;
+    return e <= SEA_LEVEL_THRESHOLD_M;
+  }
+
   isNavigable(lat, lon) {
+    const water = this.isWaterAt(lat, lon);
+    if (water !== true) return false;
+
     const { i0, i1, j0, j1 } = this._spatialIndex(lat, lon);
-    // bevaarbaar als de meeste omringende cellen water zijn: streng genoeg om
-    // land te vermijden, maar tolerant bij een kust met grof grid.
-    const cells = [
+    const corners = [
       this.elevation[i0][j0], this.elevation[i0][j1],
       this.elevation[i1][j0], this.elevation[i1][j1],
     ];
-    const water = cells.filter((e) => e != null && e <= SEA_LEVEL_THRESHOLD_M).length;
-    return water >= 3;
+    if (corners.some((e) => e == null || e >= ELEVATION_MISSING)) return false;
+    // Cel die overwegend land is: niet doorheen varen (voorkomt diagonale land-snippets).
+    const landCorners = corners.filter((e) => e > LAND_CORNER_THRESHOLD_M).length;
+    if (landCorners >= 3) return false;
+    return true;
   }
 
   // Omstandigheden op (lat,lon) op tijd tMs (epoch ms)
@@ -183,6 +302,56 @@ export class WeatherField {
       waveHeight: wave, // m (0 als geen data)
     };
   }
+
+  /** Compact wind-grid voor kaartvisualisatie op tijdstip tMs. */
+  exportWindGrid(tMs) {
+    const points = [];
+    for (let i = 0; i < this.gridN; i++) {
+      for (let j = 0; j < this.gridN; j++) {
+        const lat = this.lats[i];
+        const lon = this.lons[j];
+        if (!this.isNavigable(lat, lon)) continue;
+        const { wind } = this.conditionsAt(lat, lon, tMs);
+        if (wind.speed < 0.3) continue;
+        points.push({
+          lat: +lat.toFixed(4),
+          lon: +lon.toFixed(4),
+          from: +wind.fromDir.toFixed(0),
+          speed: +wind.speed.toFixed(1),
+        });
+      }
+    }
+    return {
+      timeMs: Math.round(tMs),
+      timeUtc: new Date(tMs).toISOString().replace(".000Z", "Z"),
+      points,
+    };
+  }
+
+  /** Compact stromings-grid voor kaartvisualisatie op tijdstip tMs. */
+  exportCurrentGrid(tMs) {
+    const points = [];
+    for (let i = 0; i < this.gridN; i++) {
+      for (let j = 0; j < this.gridN; j++) {
+        const lat = this.lats[i];
+        const lon = this.lons[j];
+        if (!this.isNavigable(lat, lon)) continue;
+        const { current } = this.conditionsAt(lat, lon, tMs);
+        if (current.speed < 0.05) continue;
+        points.push({
+          lat: +lat.toFixed(4),
+          lon: +lon.toFixed(4),
+          toward: +current.towardDir.toFixed(0),
+          speed: +current.speed.toFixed(2),
+        });
+      }
+    }
+    return {
+      timeMs: Math.round(tMs),
+      timeUtc: new Date(tMs).toISOString().replace(".000Z", "Z"),
+      points,
+    };
+  }
 }
 
 // Synthetisch veld met constante (of zelf opgegeven) omstandigheden. Bruikbaar
@@ -217,6 +386,7 @@ export function makeUniformField({
 
 // Bouw en vul een WeatherField voor de gegeven bounding box en tijdsvenster.
 export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN = 12 }) {
+  const build = async () => {
   const lats = [];
   const lons = [];
   for (let i = 0; i < gridN; i++) {
@@ -245,23 +415,42 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
   const endMs = departureMs + hoursNeeded * 3600 * 1000;
   const endDate = new Date(endMs).toISOString().slice(0, 10);
 
-  // ---- Elevation (statisch land/zee-masker) ----
-  for (const batch of chunk(coords, 90)) {
+  // ---- Elevation (statisch land/zee-masker, per punt gecacht) ----
+  async function fetchElevationBatch(batch) {
+    if (!batch.length) return;
     const latStr = batch.map((c) => c.lat.toFixed(4)).join(",");
     const lonStr = batch.map((c) => c.lon.toFixed(4)).join(",");
+    const data = await fetchJson(`${ELEVATION_URL}?latitude=${latStr}&longitude=${lonStr}`);
+    const elev = data.elevation || [];
+    batch.forEach((c, idx) => {
+      const v = elev[idx];
+      if (v == null) return;
+      field.elevation[c.i][c.j] = v;
+      setCachedElevation(c.lat, c.lon, v);
+    });
+  }
+
+  for (const c of coords) {
+    const cached = getCachedElevation(c.lat, c.lon);
+    if (cached != null) field.elevation[c.i][c.j] = cached;
+  }
+
+  let needElev = coords.filter((c) => field.elevation[c.i][c.j] == null);
+  for (const batch of chunk(needElev, 100)) {
     try {
-      const data = await fetchJson(`${ELEVATION_URL}?latitude=${latStr}&longitude=${lonStr}`);
-      const elev = data.elevation || [];
-      batch.forEach((c, idx) => {
-        field.elevation[c.i][c.j] = elev[idx] != null ? elev[idx] : 9999;
-      });
-    } catch {
-      // bij fout: behoudend als water markeren zodat routing niet vastloopt
-      batch.forEach((c) => { field.elevation[c.i][c.j] = 0; });
+      await fetchElevationBatch(batch);
+    } catch (err) {
+      log.warn("elevation_batch_failed", { n: batch.length, msg: err.message });
+      if (err instanceof OpenMeteoRateLimitError) break;
     }
   }
 
-  // ---- Wind ----
+  const missingElev = coords.filter((c) => field.elevation[c.i][c.j] == null).length;
+  if (missingElev > 0) {
+    log.warn("elevation_incomplete", { missing: missingElev, total: coords.length });
+  }
+
+  // ---- Wind (verplicht) ----
   let timesSet = false;
   for (const batch of chunk(coords, 100)) {
     const latStr = batch.map((c) => c.lat.toFixed(4)).join(",");
@@ -284,26 +473,28 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
     });
   }
 
-  // ---- Stroming (marine) — kan ontbreken voor binnenwateren; dan 0 ----
-  for (const batch of chunk(coords, 100)) {
-    const latStr = batch.map((c) => c.lat.toFixed(4)).join(",");
-    const lonStr = batch.map((c) => c.lon.toFixed(4)).join(",");
-    const url = `${MARINE_URL}?latitude=${latStr}&longitude=${lonStr}` +
-      `&hourly=ocean_current_velocity,ocean_current_direction,wave_height` +
-      `&start_date=${startDate}&end_date=${endDate}&timezone=UTC`;
-    try {
-      const data = asArray(await fetchJson(url));
-      data.forEach((loc, idx) => {
-        const c = batch[idx];
-        const h = loc.hourly;
-        if (!h) return;
-        // km/h -> kn; null laten staan (geen stroomdata => 0 in interpolatie)
-        field.curSpeed[c.i][c.j] = (h.ocean_current_velocity || []).map((v) => (v == null ? null : v * KMH_TO_KN));
-        field.curToward[c.i][c.j] = h.ocean_current_direction || null;
-        field.waveHeight[c.i][c.j] = h.wave_height || null;
-      });
-    } catch {
-      // geen stroomdata beschikbaar voor dit gebied — laat null (=> 0)
+  // ---- Stroming (marine) — optioneel; overslaan bij rate limit ----
+  if (!isOpenMeteoBlocked()) {
+    for (const batch of chunk(coords, 100)) {
+      const latStr = batch.map((c) => c.lat.toFixed(4)).join(",");
+      const lonStr = batch.map((c) => c.lon.toFixed(4)).join(",");
+      const url = `${MARINE_URL}?latitude=${latStr}&longitude=${lonStr}` +
+        `&hourly=ocean_current_velocity,ocean_current_direction,wave_height` +
+        `&start_date=${startDate}&end_date=${endDate}&timezone=UTC`;
+      try {
+        const data = asArray(await fetchJson(url));
+        data.forEach((loc, idx) => {
+          const c = batch[idx];
+          const h = loc.hourly;
+          if (!h) return;
+          field.curSpeed[c.i][c.j] = (h.ocean_current_velocity || []).map((v) => (v == null ? null : v * KMH_TO_KN));
+          field.curToward[c.i][c.j] = h.ocean_current_direction || null;
+          field.waveHeight[c.i][c.j] = h.wave_height || null;
+        });
+      } catch (err) {
+        log.warn("marine_batch_skipped", { msg: err.message });
+        break;
+      }
     }
   }
 
@@ -311,4 +502,21 @@ export async function buildWeatherField({ bbox, departureMs, hoursNeeded, gridN 
     throw new Error("Geen winddata ontvangen van Open-Meteo voor dit gebied/tijdvak.");
   }
   return field;
+  };
+
+  const timeoutMs = config.weatherFetchTimeoutMs;
+  let timer;
+  try {
+    return await Promise.race([
+      build(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Weerdata ophalen duurde te lang (>${Math.round(timeoutMs / 1000)}s). Probeer het later opnieuw.`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -6,7 +6,7 @@ import { config, validateConfig } from "./config.js";
 import { log } from "./logger.js";
 import { TtlCache } from "./cache.js";
 import { boundingBox, distanceNM } from "./routing/geo.js";
-import { buildWeatherField } from "./routing/weather.js";
+import { buildWeatherField, OpenMeteoRateLimitError } from "./routing/weather.js";
 import { routeIsochrone } from "./routing/isochrone.js";
 import { getBoat, listBoats } from "./routing/polar.js";
 import { buildRouteContext } from "./routeContext.js";
@@ -33,6 +33,19 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 
 const MAX_FORECAST_HOURS = 240;
 const forecastCache = new TtlCache({ ttlMs: config.cacheTtlMs, maxEntries: config.cacheMaxEntries });
+const forecastInFlight = new Map();
+
+function fieldElevationOk(field) {
+  let ok = 0;
+  const total = field.gridN * field.gridN;
+  for (let i = 0; i < field.gridN; i++) {
+    for (let j = 0; j < field.gridN; j++) {
+      const e = field.elevation[i]?.[j];
+      if (e != null && e < 9000) ok++;
+    }
+  }
+  return ok / total >= 0.85;
+}
 
 const rateBuckets = new Map();
 function rateLimit(req, res, next) {
@@ -115,7 +128,7 @@ app.post("/api/route", rateLimit, requireApiKey, async (req, res) => {
     const hoursNeeded = Math.min(MAX_FORECAST_HOURS, estHours);
 
     const span = Math.max(bbox.maxLat - bbox.minLat, bbox.maxLon - bbox.minLon);
-    const gridN = Math.max(8, Math.min(16, Math.round(span * 6)));
+    const gridN = Math.max(10, Math.min(12, Math.round(span * 6)));
 
     const hourBucket = Math.floor(departureMs / (3600 * 1000));
     const cacheKey = JSON.stringify({
@@ -125,9 +138,19 @@ app.post("/api/route", rateLimit, requireApiKey, async (req, res) => {
 
     const t0 = Date.now();
     let field = forecastCache.get(cacheKey);
+    if (field && !fieldElevationOk(field)) {
+      forecastCache.delete(cacheKey);
+      field = null;
+    }
     const cacheHit = !!field;
     if (!field) {
-      field = await buildWeatherField({ bbox, departureMs, hoursNeeded, gridN });
+      let pending = forecastInFlight.get(cacheKey);
+      if (!pending) {
+        pending = buildWeatherField({ bbox, departureMs, hoursNeeded, gridN })
+          .finally(() => forecastInFlight.delete(cacheKey));
+        forecastInFlight.set(cacheKey, pending);
+      }
+      field = await pending;
       forecastCache.set(cacheKey, field);
     }
     const fetchMs = Date.now() - t0;
@@ -143,6 +166,8 @@ app.post("/api/route", rateLimit, requireApiKey, async (req, res) => {
 
     res.json({
       ...result,
+      windGrid: field.exportWindGrid(departureMs),
+      currentGrid: field.exportCurrentGrid(departureMs),
       meta: {
         boat: { id: boat.id, name: boat.name },
         bbox, gridN, fetchMs, computeMs, cacheHit,
@@ -152,7 +177,12 @@ app.post("/api/route", rateLimit, requireApiKey, async (req, res) => {
     });
   } catch (err) {
     log.error("route_failed", { msg: err.message });
-    res.status(502).json({ error: err.message || "Routeberekening mislukt." });
+    const msg = err.message || "Routeberekening mislukt.";
+    const friendly = err instanceof OpenMeteoRateLimitError ? err.message
+      : /Open-Meteo 429|duurde te lang/i.test(msg)
+        ? "Weer-API tijdelijk overbelast (Open-Meteo). Wacht ~1 minuut en probeer opnieuw."
+        : msg;
+    res.status(502).json({ error: friendly });
   }
 });
 

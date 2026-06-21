@@ -46,15 +46,27 @@ function inExclusionZone(lat, lon, zones) {
   return null;
 }
 
-// Mag de boot van a naar b varen? Bemonster het segment op land/zone-overtreding.
-function legAllowed(a, b, field, zones) {
-  const steps = 5;
+// Mag de boot van a naar b varen? Bemonster het segment langs de grootcirkel.
+export function legAllowed(a, b, field, zones) {
+  const dist = distanceNM(a, b);
+  if (dist <= 0.01) return field.isNavigable(b.lat, b.lon) && !inExclusionZone(b.lat, b.lon, zones);
+  const brg = bearing(a, b);
+  const steps = Math.max(10, Math.ceil(dist * 5));
   for (let s = 1; s <= steps; s++) {
-    const t = s / steps;
-    const lat = a.lat + (b.lat - a.lat) * t;
-    const lon = a.lon + (b.lon - a.lon) * t;
-    if (!field.isNavigable(lat, lon)) return false;
-    if (inExclusionZone(lat, lon, zones)) return false;
+    const pt = destinationPoint(a, brg, dist * (s / steps));
+    if (!field.isNavigable(pt.lat, pt.lon)) return false;
+    if (inExclusionZone(pt.lat, pt.lon, zones)) return false;
+  }
+  return true;
+}
+
+function validatePath(path, field, zones) {
+  for (const n of path) {
+    if (!field.isNavigable(n.lat, n.lon)) return false;
+    if (inExclusionZone(n.lat, n.lon, zones)) return false;
+  }
+  for (let i = 1; i < path.length; i++) {
+    if (!legAllowed(path[i - 1], path[i], field, zones)) return false;
   }
   return true;
 }
@@ -157,10 +169,19 @@ export function routeIsochrone({ start, end, field, boat, departureMs, zones = [
 
   const startNode = { lat: start.lat, lon: start.lon, timeMs: departureMs, parent: null, leg: null };
 
-  if (!field.isNavigable(start.lat, start.lon)) {
+  const startWater = field.isWaterAt(start.lat, start.lon);
+  if (startWater === null) {
+    throw new Error("Kon hoogtedata voor het startpunt niet ophalen — wacht ~1 minuut (weer-API) en probeer opnieuw.");
+  }
+  if (!startWater) {
     throw new Error("Startpunt ligt niet op bevaarbaar water (of buiten datagebied).");
   }
-  if (!field.isNavigable(end.lat, end.lon)) {
+
+  const endWater = field.isWaterAt(end.lat, end.lon);
+  if (endWater === null) {
+    throw new Error("Kon hoogtedata voor de bestemming niet ophalen — wacht ~1 minuut (weer-API) en probeer opnieuw.");
+  }
+  if (!endWater) {
     throw new Error("Bestemming ligt niet op bevaarbaar water (of buiten datagebied).");
   }
 
@@ -225,6 +246,9 @@ export function routeIsochrone({ start, end, field, boat, departureMs, zones = [
   }
 
   const path = reconstruct(best);
+  if (!validatePath(path, field, zones)) {
+    throw new Error("Route kruist land — verfijn start/eind of probeer een andere vertrektijd.");
+  }
   const totalDist = path.reduce((sum, n, i) => i === 0 ? 0 : sum + distanceNM(path[i - 1], n), 0);
   const durationH = (best.timeMs - departureMs) / 3600000;
   const legs = path.filter((n) => n.leg);

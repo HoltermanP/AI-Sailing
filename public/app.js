@@ -5,6 +5,10 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 18,
   attribution: "© OpenStreetMap",
 }).addTo(map);
+map.createPane("windPane");
+map.getPane("windPane").style.zIndex = 650;
+map.createPane("currentPane");
+map.getPane("currentPane").style.zIndex = 645;
 
 const state = {
   mode: "start",      // welk punt plaatst de volgende klik
@@ -15,6 +19,11 @@ const state = {
   routeLayer: L.layerGroup().addTo(map),
   isoLayer: L.layerGroup().addTo(map),
   zoneLayer: L.layerGroup().addTo(map),
+  windLayer: L.layerGroup({ pane: "windPane" }).addTo(map),
+  currentLayer: L.layerGroup({ pane: "currentPane" }).addTo(map),
+  lastWindGrid: null,
+  lastCurrentGrid: null,
+  routeAbort: null,
   zones: [],          // [{name, polygon:[[lat,lon],...]}]
   drawing: null,      // tijdelijke zone-punten tijdens tekenen
   drawingMarkers: L.layerGroup().addTo(map),
@@ -90,8 +99,13 @@ function fmt(c) { return `${c.lat.toFixed(3)}, ${c.lon.toFixed(3)}`; }
 
 function clearRouteVisualization() {
   state.hasRoute = false;
+  state.lastWindGrid = null;
+  state.lastCurrentGrid = null;
   state.routeLayer.clearLayers();
   state.isoLayer.clearLayers();
+  state.windLayer.clearLayers();
+  state.currentLayer.clearLayers();
+  $("layerToggleWrap").classList.add("hidden");
   $("result").classList.add("hidden");
   $("explanationPanel").classList.add("hidden");
   $("explanation").textContent = "";
@@ -144,6 +158,10 @@ function placePoint(latlng) {
 }
 
 function hintForRouteError(message) {
+  if (/weer-API|Open-Meteo|hoogtedata|duurde te lang/i.test(message)) {
+    $("modeHint").innerHTML = "Weer-API tijdelijk overbelast. Wacht ~1 minuut en klik opnieuw op <b>Route berekenen</b>.";
+    return;
+  }
   if (/startpunt/i.test(message)) {
     setMode("start");
     $("modeHint").innerHTML = "Het startpunt ligt op land. Klik op het <b>water</b> of sleep marker A.";
@@ -276,11 +294,24 @@ async function computeRoute() {
   $("explanationPanel").classList.add("hidden");
   $("explanation").textContent = "";
 
+  if (state.routeAbort) state.routeAbort.abort();
+  const controller = new AbortController();
+  state.routeAbort = controller;
+  const t0 = Date.now();
+  const statusTimer = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    if (s >= 8) {
+      setStatus(`Weerdata ophalen… (${s}s — kan even duren bij drukke weer-API)`, "busy");
+    }
+  }, 4000);
+  const timeoutTimer = setTimeout(() => controller.abort(), 90000);
+
   try {
     const res = await fetch("/api/route", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
     const data = await parseJsonSafe(res);
     if (!res.ok) throw new Error(data.error || `Serverfout (HTTP ${res.status}).`);
@@ -288,10 +319,16 @@ async function computeRoute() {
     drawResult(data);
     setStatus(`Klaar in ${(data.meta.fetchMs + data.meta.computeMs) / 1000}s.`, "ok");
   } catch (err) {
-    setStatus("Fout: " + err.message, "error");
-    hintForRouteError(err.message);
+    const msg = err.name === "AbortError"
+      ? "Verzoek duurde te lang — weer-API mogelijk overbelast. Wacht ~1 minuut en probeer opnieuw."
+      : err.message;
+    setStatus("Fout: " + msg, "error");
+    hintForRouteError(msg);
     if (isMobileLayout()) setPanelExpanded(true);
   } finally {
+    clearInterval(statusTimer);
+    clearTimeout(timeoutTimer);
+    if (state.routeAbort === controller) state.routeAbort = null;
     $("compute").disabled = false;
   }
 }
@@ -338,6 +375,7 @@ function drawResult(data) {
   map.fitBounds(L.polyline(latlngs).getBounds().pad(0.25));
   renderSummary(data);
   renderLegs(data);
+  updateWeatherLayers(data.windGrid, data.currentGrid);
   fetchExplanation(data);
   if (isMobileLayout()) setPanelExpanded(true);
 }
@@ -346,6 +384,81 @@ function angleDelta(a, b) {
   let d = ((a - b + 540) % 360) - 180;
   return d;
 }
+
+function flowArrowIcon(rotDeg, speedKn, kind) {
+  const size = Math.round(Math.min(48, Math.max(24, 20 + speedKn * (kind === "wind" ? 1.1 : 18))));
+  let fill;
+  if (kind === "wind") {
+    fill = speedKn >= 22 ? "#ff5722" : speedKn >= 14 ? "#ff9800" : "#ffeb3b";
+  } else {
+    fill = speedKn >= 1.5 ? "#00e5ff" : speedKn >= 0.6 ? "#2dd4bf" : "#80cbc4";
+  }
+  const outline = "#111827";
+  return L.divIcon({
+    className: "flow-arrow-icon",
+    html: `<svg class="flow-arrow-glyph" width="${size}" height="${size}" viewBox="0 0 24 24" style="transform:rotate(${rotDeg}deg)" aria-hidden="true">
+      <line x1="12" y1="20" x2="12" y2="6" stroke="${outline}" stroke-width="5" stroke-linecap="round"/>
+      <line x1="12" y1="20" x2="12" y2="6" stroke="${fill}" stroke-width="3" stroke-linecap="round"/>
+      <polygon points="12,3 7,11 17,11" fill="${outline}"/>
+      <polygon points="12,4.5 8.5,10.5 15.5,10.5" fill="${fill}"/>
+    </svg>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
+}
+
+function renderWindLayer(grid) {
+  state.windLayer.clearLayers();
+  if (!grid?.points?.length) return;
+  for (const p of grid.points) {
+    const rot = (p.from + 180) % 360;
+    L.marker([p.lat, p.lon], { icon: flowArrowIcon(rot, p.speed, "wind"), interactive: true })
+      .addTo(state.windLayer)
+      .bindTooltip(`${p.speed} kn · wind uit ${p.from}°`, { direction: "top", offset: [0, -8] });
+  }
+}
+
+function renderCurrentLayer(grid) {
+  state.currentLayer.clearLayers();
+  if (!grid?.points?.length) return;
+  for (const p of grid.points) {
+    L.marker([p.lat, p.lon], { icon: flowArrowIcon(p.toward, p.speed, "current"), interactive: true })
+      .addTo(state.currentLayer)
+      .bindTooltip(`${p.speed} kn · stroom naar ${p.toward}°`, { direction: "top", offset: [0, -8] });
+  }
+}
+
+function updateWeatherLayers(windGrid, currentGrid) {
+  state.lastWindGrid = windGrid?.points?.length ? windGrid : null;
+  state.lastCurrentGrid = currentGrid?.points?.length ? currentGrid : null;
+
+  const hasWind = !!state.lastWindGrid;
+  const hasCurrent = !!state.lastCurrentGrid;
+
+  if (hasWind || hasCurrent) {
+    $("layerToggleWrap").classList.remove("hidden");
+    $("windToggleLabel").classList.toggle("hidden", !hasWind);
+    $("currentToggleLabel").classList.toggle("hidden", !hasCurrent);
+    if (hasWind && $("showWind").checked) renderWindLayer(state.lastWindGrid);
+    else state.windLayer.clearLayers();
+    if (hasCurrent && $("showCurrent").checked) renderCurrentLayer(state.lastCurrentGrid);
+    else state.currentLayer.clearLayers();
+  } else {
+    $("layerToggleWrap").classList.add("hidden");
+    state.windLayer.clearLayers();
+    state.currentLayer.clearLayers();
+  }
+}
+
+$("showWind").addEventListener("change", () => {
+  if ($("showWind").checked && state.lastWindGrid) renderWindLayer(state.lastWindGrid);
+  else state.windLayer.clearLayers();
+});
+
+$("showCurrent").addEventListener("change", () => {
+  if ($("showCurrent").checked && state.lastCurrentGrid) renderCurrentLayer(state.lastCurrentGrid);
+  else state.currentLayer.clearLayers();
+});
 
 function renderSummary(data) {
   const s = data.summary;

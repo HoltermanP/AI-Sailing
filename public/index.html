@@ -70,7 +70,13 @@
         <small>Data: Open-Meteo · isochronen-routing · prototype, niet voor navigatie</small>
       </footer>
     </aside>
-    <div id="map"></div>
+    <div class="map-container">
+      <div id="map"></div>
+      <div id="layerToggleWrap" class="map-layer-control hidden">
+        <label id="windToggleLabel" class="check"><input type="checkbox" id="showWind" checked /> Wind (vertrek)</label>
+        <label id="currentToggleLabel" class="check"><input type="checkbox" id="showCurrent" checked /> Stroming (vertrek)</label>
+      </div>
+    </div>
     <button type="button" id="panelToggle" class="panel-toggle" aria-expanded="false" aria-controls="sidebar" aria-label="Bediening tonen of verbergen">
       <span class="panel-toggle-icon" aria-hidden="true"></span>
       <span class="panel-toggle-label">Bediening</span>

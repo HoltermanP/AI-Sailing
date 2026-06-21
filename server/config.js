@@ -27,7 +27,11 @@ export const config = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
   anthropicModel: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
   anthropicMaxTokens: num("ANTHROPIC_MAX_TOKENS", 1200),
-  anthropicTimeoutMs: num("ANTHROPIC_TIMEOUT_MS", 45000),
+  openMeteoMinIntervalMs: num("OPEN_METEO_MIN_INTERVAL_MS", 2000),
+  openMeteo429WaitMs: num("OPEN_METEO_429_WAIT_MS", 62000),
+  openMeteoMaxRetries: num("OPEN_METEO_MAX_RETRIES", 1),
+  elevationCacheTtlMs: num("ELEVATION_CACHE_TTL_MS", 7 * 24 * 60 * 60 * 1000),
+  weatherFetchTimeoutMs: num("WEATHER_FETCH_TIMEOUT_MS", 45000),
 };
 
 // Boot-validatie: faal snel en duidelijk bij onzinnige configuratie.
