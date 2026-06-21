@@ -25,7 +25,7 @@ export const config = {
   logLevel: process.env.LOG_LEVEL || "info",
   // Anthropic — route-uitleg (optioneel; zonder key is /api/explain uitgeschakeld).
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
-  anthropicModel: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514",
+  anthropicModel: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
   anthropicMaxTokens: num("ANTHROPIC_MAX_TOKENS", 1200),
   anthropicTimeoutMs: num("ANTHROPIC_TIMEOUT_MS", 45000),
 };

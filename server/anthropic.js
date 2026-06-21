@@ -23,7 +23,17 @@ Regels:
 - Leg de belangrijkste afwegingen uit: omweg vs. directe lijn, tacks, gunstige/tegen stroming, motorgebruik, zones.
 - Noem cijfers waar relevant (afstand, omweg %, reistijd, wind, stroom).
 - Wees eerlijk over onzekerheden (synthetische polairen, grid-weer, prototype).
-- Maximaal ~450 woorden. Geen inleiding zoals "Natuurlijk" of "Hier is".`;
+- Maximaal ~450 woorden. Geen inleiding zoals "Natuurlijk" of "Hier is".
+- Vermeld geen technische metadata (geen AI-modelnamen, tokens of API-details).`;
+
+function cleanExplanationText(text) {
+  return text
+    .split("\n")
+    .filter((line) => !/^model\s*:/i.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 export function isExplainAvailable() {
   return !!config.anthropicApiKey;
@@ -61,7 +71,12 @@ ${JSON.stringify(context, null, 2)}`;
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const msg = data.error?.message || data.error?.type || `Anthropic HTTP ${res.status}`;
+      const errType = data.error?.type;
+      const errMsg = data.error?.message || "";
+      if (errType === "not_found_error" && /^model:/i.test(errMsg)) {
+        throw new Error(`Anthropic-model '${config.anthropicModel}' bestaat niet. Pas ANTHROPIC_MODEL aan (bv. claude-sonnet-4-6).`);
+      }
+      const msg = errMsg || errType || `Anthropic HTTP ${res.status}`;
       throw new Error(msg);
     }
 
@@ -73,9 +88,10 @@ ${JSON.stringify(context, null, 2)}`;
 
     if (!text) throw new Error("Leeg antwoord van Anthropic.");
 
+    const cleaned = cleanExplanationText(text);
     log.info("explain_ok", { model: data.model || config.anthropicModel, tokens: data.usage });
     return {
-      text,
+      text: cleaned,
       model: data.model || config.anthropicModel,
       usage: data.usage || null,
     };
