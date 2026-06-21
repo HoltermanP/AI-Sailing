@@ -9,6 +9,8 @@ import { boundingBox, distanceNM } from "./routing/geo.js";
 import { buildWeatherField } from "./routing/weather.js";
 import { routeIsochrone } from "./routing/isochrone.js";
 import { getBoat, listBoats } from "./routing/polar.js";
+import { buildRouteContext } from "./routeContext.js";
+import { explainRoute, isExplainAvailable } from "./anthropic.js";
 
 validateConfig();
 
@@ -66,7 +68,12 @@ app.get("/health", (req, res) => {
     cache: forecastCache.stats(),
     boats: listBoats().length,
     authRequired: !!config.apiKey,
+    explainAvailable: isExplainAvailable(),
   });
+});
+
+app.get("/api/explain/status", (req, res) => {
+  res.json({ available: isExplainAvailable(), model: config.anthropicModel });
 });
 
 app.get("/api/boats", (req, res) => {
@@ -155,6 +162,35 @@ app.post("/api/route", rateLimit, requireApiKey, async (req, res) => {
   } catch (err) {
     log.error("route_failed", { msg: err.message });
     res.status(502).json({ error: err.message || "Routeberekening mislukt." });
+  }
+});
+
+app.post("/api/explain", rateLimit, requireApiKey, async (req, res) => {
+  try {
+    if (!isExplainAvailable()) {
+      return res.status(503).json({
+        error: "Route-uitleg vereist ANTHROPIC_API_KEY in de serverconfiguratie.",
+      });
+    }
+
+    const { start, end, boatId = "cruiser", zones = [], useEngine = true, route } = req.body || {};
+    if (!route?.waypoints?.length || !route?.summary) {
+      return res.status(400).json({ error: "route met waypoints en summary is verplicht." });
+    }
+    if (!start || !end) {
+      return res.status(400).json({ error: "start en end zijn verplicht." });
+    }
+
+    const boat = getBoat(boatId);
+    const context = buildRouteContext({ start, end, boat, useEngine, zones, route });
+    const t0 = Date.now();
+    const explanation = await explainRoute(context);
+
+    log.info("explain", { ms: Date.now() - t0, model: explanation.model });
+    res.json({ explanation: explanation.text, model: explanation.model, usage: explanation.usage });
+  } catch (err) {
+    log.error("explain_failed", { msg: err.message });
+    res.status(502).json({ error: err.message || "Route-uitleg mislukt." });
   }
 });
 

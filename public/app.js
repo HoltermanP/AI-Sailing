@@ -140,8 +140,44 @@ $("clearZones").onclick = () => {
   renderZones();
 };
 
+// ---- Mobiel: inklapbaar bedieningspaneel ----
+const sidebar = $("sidebar");
+const panelToggle = $("panelToggle");
+const MOBILE_MQ = window.matchMedia("(max-width: 768px)");
+
+function isMobileLayout() {
+  return MOBILE_MQ.matches;
+}
+
+function invalidateMapSize() {
+  requestAnimationFrame(() => map.invalidateSize({ animate: false }));
+}
+
+function setPanelExpanded(expanded) {
+  if (!isMobileLayout()) {
+    sidebar.classList.remove("expanded");
+    panelToggle.setAttribute("aria-expanded", "false");
+    return;
+  }
+  sidebar.classList.toggle("expanded", expanded);
+  panelToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  setTimeout(invalidateMapSize, 300);
+}
+
+panelToggle.addEventListener("click", () => setPanelExpanded(true));
+sidebar.querySelector(".sheet-handle")?.addEventListener("click", () => setPanelExpanded(false));
+
+MOBILE_MQ.addEventListener("change", () => {
+  setPanelExpanded(false);
+  invalidateMapSize();
+});
+window.addEventListener("resize", invalidateMapSize);
+window.addEventListener("orientationchange", () => setTimeout(invalidateMapSize, 350));
+map.whenReady(invalidateMapSize);
+
 // ---- Kaart-klik & dubbelklik ----
 map.on("click", (e) => {
+  if (isMobileLayout() && sidebar.classList.contains("expanded")) setPanelExpanded(false);
   if (state.drawing) {
     state.drawing.push(e.latlng);
     L.circleMarker(e.latlng, { radius: 4, color: "#f59e0b" }).addTo(state.drawingMarkers);
@@ -183,6 +219,8 @@ async function computeRoute() {
   setStatus("Weerdata ophalen en route berekenen…", "busy");
   state.routeLayer.clearLayers();
   state.isoLayer.clearLayers();
+  $("explanationPanel").classList.add("hidden");
+  $("explanation").textContent = "";
 
   try {
     const res = await fetch("/api/route", {
@@ -244,6 +282,8 @@ function drawResult(data) {
   map.fitBounds(L.polyline(latlngs).getBounds().pad(0.25));
   renderSummary(data);
   renderLegs(data);
+  fetchExplanation(data);
+  if (isMobileLayout()) setPanelExpanded(true);
 }
 
 function angleDelta(a, b) {
@@ -290,6 +330,80 @@ function renderLegs(data) {
     prevCog = w.cog;
   });
   $("legs").innerHTML = rows;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderMarkdownLite(text) {
+  const blocks = text.split(/\n\n+/);
+  return blocks.map((block) => {
+    const lines = block.split("\n");
+    if (lines[0].startsWith("## ")) {
+      return `<h4>${escapeHtml(lines[0].slice(3))}</h4>${lines.slice(1).map((l) => `<p>${escapeHtml(l)}</p>`).join("")}`;
+    }
+    if (lines.every((l) => l.startsWith("- ") || l.startsWith("* "))) {
+      return `<ul>${lines.map((l) => `<li>${escapeHtml(l.slice(2))}</li>`).join("")}</ul>`;
+    }
+    return `<p>${escapeHtml(block).replace(/\n/g, "<br>")}</p>`;
+  }).join("");
+}
+
+let explainRequestId = 0;
+
+async function fetchExplanation(routeData) {
+  const panel = $("explanationPanel");
+  const el = $("explanation");
+  const reqId = ++explainRequestId;
+
+  panel.classList.remove("hidden");
+  el.className = "explanation loading";
+  el.textContent = "Route-uitleg genereren via Anthropic…";
+
+  const depVal = $("departure").value;
+  const departure = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(depVal)
+    ? depVal + ":00Z"
+    : new Date().toISOString();
+
+  try {
+    const res = await fetch("/api/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start: state.start,
+        end: state.end,
+        boatId: $("boat").value,
+        departure,
+        zones: state.zones,
+        useEngine: $("useEngine").checked,
+        route: {
+          waypoints: routeData.waypoints,
+          summary: routeData.summary,
+          meta: routeData.meta,
+        },
+      }),
+    });
+    const data = await parseJsonSafe(res);
+    if (reqId !== explainRequestId) return;
+
+    if (!res.ok) {
+      el.className = "explanation error";
+      el.textContent = data.error || "Route-uitleg kon niet worden opgehaald.";
+      return;
+    }
+
+    el.className = "explanation";
+    el.innerHTML = renderMarkdownLite(data.explanation || "");
+  } catch (err) {
+    if (reqId !== explainRequestId) return;
+    el.className = "explanation error";
+    el.textContent = "Fout bij route-uitleg: " + err.message;
+  }
 }
 
 setMode("start");
