@@ -8,7 +8,7 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "test": "node --test test/",
-    "typecheck": "for f in server/index.js server/config.js server/logger.js server/cache.js server/routeContext.js server/anthropic.js server/routing/*.js public/app.js; do node --check \"$f\" || exit 1; done",
+    "typecheck": "for f in server/index.js server/app.js server/config.js server/logger.js server/cache.js server/routeContext.js server/anthropic.js server/routing/*.js api/index.js public/app.js; do node --check \"$f\" || exit 1; done",
     "lint": "eslint ."
   },
   "engines": {
